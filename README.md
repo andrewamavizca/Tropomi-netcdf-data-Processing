@@ -17,5 +17,3 @@ You can then call on each scene created
 scene[0]['xch4_corrected']
 
 ```
-
-hello
