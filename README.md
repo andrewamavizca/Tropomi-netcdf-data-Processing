@@ -10,7 +10,7 @@ scan_line_lists, num_scan_lines, data_type =  process_data_to_scan_line_lists(da
 scene = create_matrices(scan_line_lists, num_scan_lines, data_type)
 ```
 
-You can then call on each scene in created
+You can then call on each scene created
 
 ```python
 
