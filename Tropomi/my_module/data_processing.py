@@ -3,15 +3,17 @@ import numpy as np
 import warnings
 
 class MethaneDataProcessor:
-    def __init__(self, file_name, bbox=None):
+    """Class to process methane data from Sron S5P-Data Product netCDF file"""
+    def __init__(self, file_name):
         self.file_name = file_name
-        self.bbox = bbox
         self.data = self.collect_data()
         self.processed_data = self.process_data()
-        self.slarray_data = self.data2slarray()
+        self.slarray_data = self.data_to_scanline_array()
+        self.channel_map = self.create_channel_map()
         self.scenes = self.generate_scenes()
 
     def collect_data(self):
+        """Collect data from the netCDF file. Currently, set for all variables"""
         if not self.file_name.endswith('.nc'):
             raise ValueError("File must have a .nc extension")
         
@@ -95,6 +97,8 @@ class MethaneDataProcessor:
         return data
 
     def process_data(self):
+        
+        """ Filter data based on Automated Decection of methane super emitters """
         non_masked_indices = np.where(~self.data['pixel_id'])[0]
 
         swir_aerosol_optical_depth = self.data['aerosol_optical_thickness'][:, 1]
@@ -105,6 +109,8 @@ class MethaneDataProcessor:
         
         mixed_albedo = 2.4 * nir_surface_albedo[non_masked_indices] - 1.13 * swir_surface_albedo[non_masked_indices]
 
+        # Filter data based on parameters from paper
+
         filtered_indices = non_masked_indices[
             (self.data['qa_value'][non_masked_indices] >= 0.4) &
             (self.data['xch4_precision'][non_masked_indices] < 10) &
@@ -114,11 +120,25 @@ class MethaneDataProcessor:
             (mixed_albedo < 0.95) &
             (self.data['cloud_fraction'][non_masked_indices][:, 0] < 0.02)
         ]
-        processed_data = {key: self.data[key][filtered_indices] for key in self.data.keys() if key not in ['title','institution', 'source', 'date_created', 'l1b_file','pixel_id', 'glintflag','landflag', 'error_id','qa_value','processing_quality_flags']}
-        
+        processed_data = {
+            key: self.data[key][filtered_indices] for key in self.data.keys() if key not in [
+            'title',
+            'institution',
+            'source',
+            'date_created',
+            'l1b_file',
+            'pixel_id',
+            'glintflag',
+            'landflag',
+            'error_id',
+            'qa_value',
+            'processing_quality_flags'
+            ]}
+
         return processed_data
 
-    def data2slarray(self):
+    def data_to_scanline_array(self):
+        """Sort data into a structured array with scanline and ground pixel indices"""
         warnings.filterwarnings("ignore", category=RuntimeWarning)
 
         variable_info = [
@@ -272,7 +292,31 @@ class MethaneDataProcessor:
             }
         return slarrayData
 
+    def normalize_methane(self, matrix):
+        """
+        Normalize methane data. Based on reserach paper.
+
+        """
+        mean_ch4 = np.nanmean(matrix)
+        std_ch4 = np.nanstd(matrix)
+        lower_bound = mean_ch4 - std_ch4
+        
+        # 100 ppb added to mean, then subtract std
+        upper_bound = mean_ch4 + 100 - std_ch4  
+        
+        # Replace NaN values with 0
+        matrix = np.where(np.isnan(matrix), 0, matrix)
+        
+        # Normalize the data between 0 and 1    
+        normalized_matrix = np.where(matrix < lower_bound, 0, matrix)
+        normalized_matrix = np.where(matrix > upper_bound, 1, normalized_matrix)  
+        in_between = (matrix >= lower_bound) & (matrix <= upper_bound)
+        normalized_matrix[in_between] = (matrix[in_between] - lower_bound) / (upper_bound - lower_bound)
+
+        return normalized_matrix
+    
     def generate_scenes(self):
+        """ Returns tensors representing 32x32 scenes of data """
         matrices = []
 
         max_indices = len(self.slarray_data['scan_line_lists'][0])
@@ -288,28 +332,53 @@ class MethaneDataProcessor:
                 block = self.slarray_data['scan_line_lists'][start_row:start_row+32, start_col:start_col+32]
                 
                 if np.count_nonzero(~np.isnan(block['xch4_corrected'])) > 220:
-                    if self.bbox:
-                        if (np.nanmin(block['latitude_corners']) > self.bbox[0] and np.nanmax(block['latitude_corners']) < self.bbox[1] and
-                            np.nanmin(block['longitude_corners']) > self.bbox[2] and np.nanmax(block['longitude_corners']) < self.bbox[3]):
-                            matrices.append(block)
-                    else:
-                        matrices.append(block)
-                        
-        tensor = np.array(matrices, dtype=self.slarray_data['data_type'])
+
+                    matrices.append(block)
+
+        # Flatten multi-dimensional fields and add normalized methane
+        flattened_matrices = []
+        for matrix in matrices:
+            flat_matrix = []
+            for name in matrix.dtype.names:  # Use the actual structured array to get field names
+                field_data = matrix[name]
+                if field_data.ndim > 2:
+                    # Flatten the multi-dimensional field
+                    flat_matrix.extend([field_data[..., i] for i in range(field_data.shape[-1])])
+                else:
+                    flat_matrix.append(field_data)
+            
+            # Normalize the methane data
+            normalized_ch4 = self.normalize_methane(matrix['xch4_corrected'])
+            
+            # Add the normalized methane as the last channel
+            flat_matrix.append(normalized_ch4)
+            
+            # Stack the flattened matrix
+            flattened_matrices.append(np.stack(flat_matrix, axis=0))
         
+        # Convert to a structured array or tensor
+        tensor = np.array(flattened_matrices)
+
         return tensor
-
-def normalize_methane(matrix):
-    mean_ch4 = np.nanmean(matrix)
-    std_ch4 = np.nanstd(matrix)
-    lower_bound = mean_ch4 - std_ch4
-    upper_bound = mean_ch4 + 100 - std_ch4  
     
-    matrix = np.where(np.isnan(matrix), 0, matrix)
-    
-    normalized_matrix = np.where(matrix < lower_bound, 0, matrix)
-    normalized_matrix = np.where(matrix > upper_bound, 1, normalized_matrix)  
-    in_between = (matrix >= lower_bound) & (matrix <= upper_bound)
-    normalized_matrix[in_between] = (matrix[in_between] - lower_bound) / (upper_bound - lower_bound)
+    def create_channel_map(self):
+        """Create a mapping of field names to channel slices"""
+        channel_map = {}
+        current_channel = 0
 
-    return normalized_matrix
+        for name, field_type, *field_shape in self.slarray_data['data_type']:
+            # Ensure current_channel is an integer
+            current_channel = int(current_channel)
+
+            if not field_shape:  # Scalar field
+                channel_map[name] = slice(current_channel, current_channel + 1)
+                current_channel += 1
+            else:  # Multi-dimensional field
+                total_channels = int(np.prod(field_shape))
+                channel_map[name] = slice(current_channel, current_channel + total_channels)
+                current_channel += total_channels
+
+        # Add the normalized methane variable as the last channel
+        channel_map['normalized_ch4'] = slice(current_channel, current_channel + 1)
+
+        return channel_map
