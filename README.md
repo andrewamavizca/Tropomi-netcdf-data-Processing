@@ -3,6 +3,7 @@
 
  This is a documentation of my progress replicating the journal paper "Automated Detection and monitorig of methane super-emitters using sattelite data". I will be documenting the steps taken to replicate the work in as much 
  detail as possible.
+ Link to an article I wrote going over the sliding window implementation on the tropomi data [Medium](https://medium.com/@aamavizca/tropomi-netcdf-file-data-to-raster-while-applying-moving-window-algorithm-33d997a067ca)
 ## Downloading Data
  The TROPOMI SRON_CH4 data product can be  downloaded here [SRON_CH4](https://ftp.sron.nl/open-access-data-2/TROPOMI/tropomi/ch4/18_17/)
  
